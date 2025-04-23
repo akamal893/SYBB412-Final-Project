@@ -1,0 +1,614 @@
+---
+title: "DEG"
+output: html_document
+date: "2025-04-22"
+---
+
+# Overview
+
+This analysis performs differential expression analysis using the MAST package on scRNA-seq data to identify genes distinguishing SCLC-A and SCLC-N subtypes, and follows up with enrichment analysis.
+
+
+```{r setup, include=FALSE}
+library(MAST)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(SeuratObject)
+library(future)
+library(future.apply)
+library(SingleCellExperiment)
+library(data.table)
+library(ggrepel)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(enrichplot)
+library(msigdbr)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Seurat Object
+
+```{r}
+setwd("SYBB412Project")
+
+# 1.prepare data function
+prepare_data <- function(seurat_obj, subtype_col = "SCLC_subtype") {
+  # Filter only SCLC-A and SCLC-N cells
+  a_n_cells <- seurat_obj@meta.data[[subtype_col]] %in% c("SCLC-A", "SCLC-N")
+  seurat_obj_a_n <- subset(seurat_obj, cells = colnames(seurat_obj)[a_n_cells])
+  
+  # Setup for comparison 
+  seurat_obj_a_n$celltype <- factor(seurat_obj_a_n@meta.data[[subtype_col]], 
+                                   levels = c("SCLC-N", "SCLC-A"))
+  
+  print(levels(seurat_obj_a_n$celltype))
+  
+  # Save intermediate result
+  saveRDS(seurat_obj_a_n, file = "SCLC_A_N_filtered_data.rds")
+  
+  return(seurat_obj_a_n)
+}
+
+# 2. setup parallel 
+setup_parallel <- function() {
+  plan(multicore, workers = parallel::detectCores() - 1)
+  plan(multicore, workers = 14)
+  options(future.globals.maxSize = 60 * 1024^3)  # 50GB max memory
+}
+
+# 3. create gene chunks
+create_gene_chunks <- function(seurat_obj, chunk_size = 3000) {
+  gene_list <- rownames(seurat_obj)
+  gene_chunks <- split(gene_list, ceiling(seq_along(gene_list)/chunk_size))
+  
+  # Save intermediate result
+  saveRDS(gene_chunks, file = "SCLC_gene_chunks.rds")
+  
+  return(gene_chunks)
+}
+
+# 4. MAST process gene chunk
+process_gene_chunk <- function(seurat_obj, genes_subset, chunk_id) {
+  cat("Processing chunk", chunk_id, "\n")
+  
+  # Subset genes for this chunk
+  seurat_chunk <- subset(seurat_obj, features = genes_subset)
+  
+  # Convert to sca object for MAST
+  DefaultAssay(seurat_chunk) <- "RNA"
+  sce <- as.SingleCellExperiment(seurat_chunk)
+  sca <- MAST::SceToSingleCellAssay(sce)
+  
+  # Add important covariates
+  sca$cngeneson <- scale(colSums(GetAssayData(seurat_chunk, slot="counts") > 0))
+  
+  # Run ZLM model
+  zlmData <- zlm(~ celltype + cngeneson, sca)
+  
+  # Extract the contrast results
+  summaryCond <- summary(zlmData, doLRT = "celltypeSCLC-A")
+  print(colnames(zlmData@coefD))
+  
+  # Get the hurdle p-values
+  summaryDt <- summaryCond$datatable
+  
+  # Filter for the condition coefficient
+  fcHurdle <- merge(summaryDt[contrast=="celltypeSCLC-A" & component=="H", c("primerid", "Pr(>Chisq)")], 
+                   summaryDt[contrast=="celltypeSCLC-A" & component=="logFC", c("primerid", "coef", "ci.hi", "ci.lo")], 
+                   by="primerid")
+  
+  # Clean up the results table
+  fcHurdle$fdr <- p.adjust(fcHurdle$`Pr(>Chisq)`, method="BH")
+  fcHurdle <- fcHurdle[order(fcHurdle$fdr),]
+  colnames(fcHurdle) <- c("gene", "p_value", "avg_log2FC", "ci_hi", "ci_lo", "fdr")
+  
+  # Save intermediate result for this chunk
+  saveRDS(fcHurdle, file = paste0("SCLC_DE_chunk_", chunk_id, ".rds"))
+  
+  return(fcHurdle)
+}
+
+# 5. combine all chunk results
+combine_chunk_results <- function(num_chunks) {
+  results_list <- list()
+  
+  for(i in 1:num_chunks) {
+    results_list[[i]] <- readRDS(paste0("SCLC_DE_chunk_", i, ".rds"))
+  }
+  
+  combined_results <- do.call(rbind, results_list)
+  
+  # Save intermediate result
+  saveRDS(combined_results, file = "SCLC_combined_DE_results.rds")
+  
+  return(combined_results)
+}
+
+# 6. calculate percent and filter
+filter_results <- function(seurat_obj, de_results, subtype_col = "SCLC_subtype", 
+                           min_pct = 0.1, logfc.threshold = 0.25) {
+  
+  # Filter by fold change and FDR
+  filtered_results <- de_results %>%
+    dplyr::filter(fdr < 0.05 & abs(avg_log2FC) > logfc.threshold)
+  
+  # Save intermediate results after first filter
+  saveRDS(filtered_results, file = "SCLC_DE_first_filter.rds")
+  
+  # Calculate percent expressed in each group
+  a_cells <- seurat_obj@meta.data[[subtype_col]] == "SCLC-A"
+  n_cells <- seurat_obj@meta.data[[subtype_col]] == "SCLC-N"
+  
+  # Calculate percent expressed in parallel for large datasets
+  pct_calc <- function(gene) {
+    expr_a <- mean(GetAssayData(seurat_obj, slot="counts")[gene, a_cells] > 0)
+    expr_n <- mean(GetAssayData(seurat_obj, slot="counts")[gene, n_cells] > 0)
+    return(c(expr_a, expr_n))
+  }
+  
+  significant_genes <- filtered_results$gene
+  pct_matrix <- future_lapply(significant_genes, pct_calc)
+  pct_df <- as.data.frame(do.call(rbind, pct_matrix))
+  colnames(pct_df) <- c("pct.1", "pct.2")
+  rownames(pct_df) <- significant_genes
+  
+  # Save percentage expression data
+  saveRDS(pct_df, file = "SCLC_pct_expressed.rds")
+  
+  # Add percent expressed to results
+  filtered_results <- cbind(filtered_results, pct_df[filtered_results$gene, ])
+  
+  # Apply minimum percent expressed filter
+  final_results <- filtered_results %>%
+    dplyr::filter(pct.1 > min_pct | pct.2 > min_pct)
+  
+  # Save final filtered results
+  saveRDS(final_results, file = "SCLC_final_DE_results.rds")
+  
+  return(final_results)
+}
+
+# 7. main function
+perform_modular_de_analysis <- function(seurat_obj, 
+                                      subtype_col = "SCLC_subtype", 
+                                      min_pct = 0.1, 
+                                      logfc.threshold = 0.25,
+                                      chunk_size = 2000) {
+  
+  # 1. prepare data
+  seurat_filtered <- prepare_data(seurat_obj, subtype_col)
+  
+  # 2. setup parallel
+  setup_parallel()
+  
+  # 3. create gene chunks
+  gene_chunks <- create_gene_chunks(seurat_filtered, chunk_size)
+  
+  # 4. perform MAST analysis
+  results_list <- list()
+  for(i in seq_along(gene_chunks)) {
+    results_list[[i]] <- process_gene_chunk(seurat_filtered, gene_chunks[[i]], i)
+  }
+  
+  # 5. combin all results
+  combined_results <- combine_chunk_results(length(gene_chunks))
+  
+  # 6. filter results
+  final_results <- filter_results(seurat_obj, combined_results, 
+                                  subtype_col, min_pct, logfc.threshold)
+  
+  de_results <- list()
+  de_results[["SCLC-A_vs_SCLC-N"]] <- final_results
+  
+  saveRDS(de_results, file = "SCLC_differential_expression_results.rds")
+  
+  return(de_results)
+}
+```
+
+
+# Visulization
+
+```{r, echo=FALSE}
+
+# install.packages("readr")
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(EnhancedVolcano)
+library(readr)
+library(scales)
+
+# Read the RDS file
+de_results <- readRDS("SCLC_differential_expression_results.rds")
+
+# Extract the data.frame from the list
+de_data <- de_results[["SCLC-A_vs_SCLC-N"]]
+
+# Data exploration and summary
+summary(de_data)
+head(de_data)
+
+# 1. Transform extremely small p-values and FDR values
+# Replace 0 values with the minimum non-zero value or a small constant
+min_pval <- min(de_data$p_value[de_data$p_value > 0], na.rm = TRUE)
+min_fdr <- min(de_data$fdr[de_data$fdr > 0], na.rm = TRUE)
+
+# Replace zeros with minimum values for log transformation
+de_data <- de_data %>%
+  mutate(
+    p_value_adj = ifelse(p_value == 0, min_pval, p_value),
+    fdr_adj = ifelse(fdr == 0, min_fdr, fdr),
+    neg_log10_pval = -log10(p_value_adj),
+    neg_log10_fdr = -log10(fdr_adj)
+  )
+
+# 2. Volcano Plot with Enhanced Volcano
+
+# Create a volcano plot using customized ggplot
+
+de_data$threshold <- "Not Significant"
+de_data$threshold[de_data$p_value_adj < 0.05 & de_data$avg_log2FC > 0.25] <- "Up-regulated"
+de_data$threshold[de_data$p_value_adj < 0.05 & de_data$avg_log2FC < -0.25] <- "Down-regulated"
+
+# Calculate -log10(p-values), handle extreme values and NAs
+de_data$log10_p <- -log10(de_data$p_value_adj)
+# Handle infinite values caused by extremely small p-values
+max_log10p <- 50  
+de_data$log10_p[is.infinite(de_data$log10_p) | de_data$log10_p > max_log10p] <- max_log10p
+de_data$log10_p[is.na(de_data$log10_p)] <- 0
+
+# Manually create a volcano plot
+custom_volcano <- ggplot(de_data, aes(x = avg_log2FC, y = log10_p, color = threshold)) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  scale_color_manual(values = c("Up-regulated" = "red", "Down-regulated" = "blue", "Not Significant" = "grey")) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  labs(title = "SCLC-A vs SCLC-N",
+       subtitle = "Differential Expression Analysis",
+       x = "Log2 Fold Change",
+       y = "-Log10 P-value",
+       color = "Regulation") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 15, hjust = 0.5),
+    axis.title = element_text(size = 15, face = "bold"),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 15, face = "bold"),
+    legend.text = element_text(size = 12),
+    panel.grid.minor = element_blank()
+  ) +
+  xlim(-2, 2) +
+  ylim(0, 50) +
+  # Add labels to highlight important genes
+  geom_text_repel(
+    data = subset(de_data, p_value_adj < 0.001 & abs(avg_log2FC) > 0.5),
+    aes(label = gene),
+    size = 3.5,
+    box.padding = 0.5,
+    point.padding = 0.3,
+    max.overlaps = 20
+  )
+
+# Save the customized volcano plot
+ggsave("custom_volcano_plot_SCLC_A_vs_N.png", custom_volcano, width = 12, height = 10, dpi = 300)
+
+# 3. MA Plot
+ma_plot <- ggplot(de_data, aes(x = (pct.1 + pct.2)/2, y = avg_log2FC, color = regulation)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "Not Significant" = "gray")) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "MA Plot: SCLC-A vs SCLC-N",
+    x = "Mean Expression",
+    y = "log2 Fold Change",
+    color = "Regulation"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    legend.position = "right",
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+ggsave("ma_plot.png", ma_plot, width = 10, height = 8)
+
+
+# 4. Top genes bar plot
+# Get top 20 differentially expressed genes (based on absolute fold change)
+top_genes <- de_data %>%
+  filter(fdr < 0.05) %>%
+  arrange(desc(abs(avg_log2FC))) %>%
+  head(20)
+
+# Create barplot of top genes
+top_genes_plot <- ggplot(top_genes, aes(x = reorder(gene, avg_log2FC), y = avg_log2FC, fill = avg_log2FC > 0)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue"), 
+                   labels = c("TRUE" = "Up", "FALSE" = "Down"),
+                   name = "Regulation") +
+  coord_flip() +
+  labs(
+    title = "Top 20 Differentially Expressed Genes",
+    x = "Gene",
+    y = "log2 Fold Change"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+ggsave("top_genes_plot.png", top_genes_plot, width = 10, height = 8)
+
+
+# 5. P-value and FDR distribution
+p_dist_plot <- ggplot(de_data, aes(x = p_value_adj)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  scale_x_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  ) +
+  labs(
+    title = "P-value Distribution",
+    x = "P-value (log10 scale)",
+    y = "Count"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+ggsave("p_dist_plot.png", p_dist_plot, width = 10, height = 8)
+
+# 6. Expression heatmap of top genes
+if (requireNamespace("pheatmap", quietly = TRUE)) {
+  library(pheatmap)
+  
+  # Create a matrix for heatmap
+  heatmap_data <- top_genes %>%
+    select(gene, avg_log2FC, ci_hi, ci_lo, pct.1, pct.2) %>%
+    column_to_rownames("gene")
+  
+  # Scale the data for better visualization
+  heatmap_scaled <- scale(heatmap_data)
+  
+  # Create annotation for genes
+  gene_annotation <- data.frame(
+    Regulation = ifelse(top_genes$avg_log2FC > 0, "Up", "Down"),
+    row.names = top_genes$gene
+  )
+  
+  # Create color palette
+  ann_colors <- list(
+    Regulation = c(Up = "red", Down = "blue")
+  )
+  
+  # First, explicitly open a PNG device with a file path
+  grDevices::cairo_pdf("heatmap_top_genes.pdf", width = 8, height = 10)
+  
+  # Create heatmap
+  pheatmap(
+    heatmap_scaled,
+    main = "Heatmap of Top 20 Differentially Expressed Genes",
+    annotation_row = gene_annotation,
+    annotation_colors = ann_colors,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    show_rownames = TRUE,
+    show_colnames = TRUE,
+    fontsize_row = 8,
+    fontsize_col = 10
+  )
+  
+  # Close the device to save the file
+  dev.off()
+  
+  # Print confirmation message
+  cat("Heatmap saved as 'heatmap_top_genes.png'\n")
+}
+
+# 7. Save all plots to PDF
+pdf("SCLC_DE_analysis_results.pdf", width = 12, height = 10)
+print(volcano_plot)
+print(ma_plot)
+print(top_genes_plot)
+print(p_dist_plot)
+if (requireNamespace("pheatmap", quietly = TRUE)) {
+  pheatmap(
+    heatmap_scaled,
+    main = "Heatmap of Top 20 Differentially Expressed Genes",
+    annotation_row = gene_annotation,
+    annotation_colors = ann_colors,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    show_rownames = TRUE,
+    show_colnames = TRUE,
+    fontsize_row = 8,
+    fontsize_col = 10
+  )
+}
+dev.off()
+
+
+```
+
+
+
+# GO & Reactome
+```{r, echo=FALSE}
+de_results <- readRDS("SCLC_differential_expression_results.rds")
+# Extract data from deg_results
+first_element_name <- names(de_results)[1]
+# Use [[]] to access due to special characters in the name
+deg_data <- de_results[[first_element_name]]
+
+# Filter significantly differentially expressed genes
+significant_genes <- deg_data[deg_data$fdr < 0.05 & abs(deg_data$avg_log2FC) > 0.5, ]
+
+# Print the number of significant DEGs
+cat("Number of significantly differentially expressed genes:", nrow(significant_genes), "\n")
+
+# Prepare gene list
+gene_list <- significant_genes$gene
+
+# Convert gene symbols to Entrez IDs
+gene_entrez <- bitr(gene_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+cat("Number of genes successfully mapped to Entrez IDs:", nrow(gene_entrez), "\n")
+
+# Extract Entrez ID list
+entrez_ids <- gene_entrez$ENTREZID
+
+# Separate upregulated and downregulated genes
+up_genes <- significant_genes[significant_genes$avg_log2FC > 0, ]$gene
+down_genes <- significant_genes[significant_genes$avg_log2FC < 0, ]$gene
+cat("Number of upregulated genes:", length(up_genes), "\n")
+cat("Number of downregulated genes:", length(down_genes), "\n")
+
+# GO enrichment analysis
+# Perform GO enrichment on all significant DEGs
+if (nrow(as.data.frame(go_results)) > 0 && sum(go_results@result$p.adjust < 0.05) > 0) {
+  pdf("GO_network.pdf", width = 12, height = 10)
+  emapplot(pairwise_termsim(go_results), showCategory = 30)
+  dev.off()
+}
+
+go_results <- enrichGO(
+  gene = entrez_ids,
+  OrgDb = org.Hs.eg.db,
+  ont = "ALL",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1,  
+  qvalueCutoff = 0.1  
+)
+
+
+# Save GO enrichment results
+write.csv(as.data.frame(go_results), "GO_enrichment_results.csv", row.names = FALSE)
+
+# Visualize GO enrichment results
+# Barplot
+pdf("GO_barplot.pdf", width = 12, height = 8)
+barplot(go_results, showCategory = 20)
+dev.off()
+
+# Dotplot
+pdf("GO_dotplot.pdf", width = 12, height = 8)
+dotplot(go_results, showCategory = 20)
+dev.off()
+
+# KEGG pathway analysis
+kegg_results <- enrichKEGG(
+  gene = entrez_ids,
+  organism = "hsa",  
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.1,  
+  qvalueCutoff = 0.1,
+  minGSSize = 3  
+)
+
+# Save KEGG results
+write.csv(as.data.frame(kegg_results), "KEGG_enrichment_results.csv", row.names = FALSE)
+
+# Visualize KEGG results
+if (nrow(as.data.frame(kegg_results)) > 0 && sum(!is.na(kegg_results@result$p.adjust)) > 0) {
+
+  pdf("KEGG_barplot.pdf", width = 12, height = 8)
+  barplot(kegg_results, showCategory = 20)
+  dev.off()
+  
+  pdf("KEGG_dotplot.pdf", width = 12, height = 8)
+  dotplot(kegg_results, showCategory = 20)
+  dev.off()
+  
+  pdf("KEGG_pathway.pdf", width = 12, height = 10)
+  pathview <- try(pathview(gene.data = gene_entrez$ENTREZID, 
+                   pathway.id = kegg_results@result$ID[1],
+                   species = "hsa"))
+  dev.off()
+  
+  pdf("KEGG_network.pdf", width = 12, height = 10)
+  emapplot(pairwise_termsim(kegg_results), showCategory = 30)
+  dev.off()
+  
+
+  cat("\nTop 10 KEGG enrichment results:\n")
+  print(head(as.data.frame(kegg_results), 10))
+}
+
+# Inform if no KEGG results found
+if (nrow(as.data.frame(kegg_results)) == 0 || sum(!is.na(kegg_results@result$p.adjust)) == 0) {
+  cat("\nKEGG分析未找到显著富集的通路。\n")
+}
+
+# Prepare gene list with log2FC for GSEA
+gene_list <- significant_genes$avg_log2FC
+names(gene_list) <- significant_genes$gene
+
+# Convert to Entrez IDs
+gene_df <- bitr(names(gene_list), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+gene_list_entrez <- gene_list[names(gene_list) %in% gene_df$SYMBOL]
+names(gene_list_entrez) <- gene_df$ENTREZID[match(names(gene_list_entrez), gene_df$SYMBOL)]
+gene_list_entrez <- sort(gene_list_entrez, decreasing = TRUE)
+
+# GSEA analysis using KEGG
+kegg_gsea <- gseKEGG(
+  geneList = gene_list_entrez,
+  organism = "hsa",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.2,
+  pAdjustMethod = "BH"
+)
+
+# Load Hallmark gene sets from MSigDB
+msigdbr_species <- msigdbr_species()
+print(head(msigdbr_species))
+h_gene_sets <- msigdbr(species = "Homo sapiens", category = "H")
+hallmark_list <- split(h_gene_sets$entrez_gene, h_gene_sets$gs_name)
+
+# Enrichment analysis using Hallmark gene sets
+hallmark_enrichment <- enricher(
+  gene = entrez_ids,
+  TERM2GENE = data.frame(term = h_gene_sets$gs_name, gene = h_gene_sets$entrez_gene),
+  pvalueCutoff = 0.2,
+  qvalueCutoff = 0.2
+)
+
+
+
+# Visualization of Hallmark enrichment results
+
+pdf("Hallmark_barplot.pdf", width = 12, height = 10)  
+print(barplot(hallmark_enrichment, showCategory = min(20, nrow(hallmark_enrichment@result))))
+dev.off()
+
+pdf("Hallmark_dotplot.pdf", width = 12, height = 10)
+print(dotplot(hallmark_enrichment, showCategory = min(20, nrow(hallmark_enrichment@result))))
+dev.off()
+
+pdf("Hallmark_heatplot.pdf", width = 14, height = 10)
+print(heatplot(hallmark_enrichment, showCategory = min(15, nrow(hallmark_enrichment@result))))
+dev.off()
+
+if (requireNamespace("enrichplot", quietly = TRUE)) {
+  pdf("Hallmark_emapplot.pdf", width = 12, height = 10)
+  hallmark_pairwise <- try(pairwise_termsim(hallmark_enrichment))
+  if (!inherits(hallmark_pairwise, "try-error")) {
+    print(emapplot(hallmark_pairwise, showCategory = min(30, nrow(hallmark_enrichment@result))))
+  }
+  dev.off()
+}
+
+write.csv(as.data.frame(hallmark_enrichment), "Hallmark_complete_results.csv", row.names = FALSE)
+
+
+```
