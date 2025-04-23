@@ -1,7 +1,7 @@
 ---
-title: "DEG"
+title: "SCLC Subtype Differential Expression Analysis "
 output: html_document
-date: "2025-04-22"
+date: "`r Sys.Date()`"
 ---
 
 # Overview
@@ -542,11 +542,6 @@ if (nrow(as.data.frame(kegg_results)) > 0 && sum(!is.na(kegg_results@result$p.ad
 
   cat("\nTop 10 KEGG enrichment results:\n")
   print(head(as.data.frame(kegg_results), 10))
-}
-
-# Inform if no KEGG results found
-if (nrow(as.data.frame(kegg_results)) == 0 || sum(!is.na(kegg_results@result$p.adjust)) == 0) {
-  cat("\nKEGG分析未找到显著富集的通路。\n")
 }
 
 # Prepare gene list with log2FC for GSEA
