@@ -6,7 +6,6 @@ This repository contains the full R-based workflow for identifying and analyzing
 
 - `immune_suppression_analysis.Rmd`: Main reproducible R Markdown script.
 - `results/`: Output files including filtered genes, enrichment results, and plots.
-- `scripts/`: Optional scripts such as custom filtering functions.
 
 ## Data Sources & References
 
