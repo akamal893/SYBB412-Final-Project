@@ -23,7 +23,7 @@ This classification method is **adapted from published work** and only used for 
 - The subtype-specific gene signatures (SCLC-A, N, P) used in this project are based on the study by George et al., 2015:
   > George, J., et al. *Comprehensive genomic profiles of small cell lung cancer*. Nature 524, 47–53 (2015). [https://doi.org/10.1038/nature14664](https://www.nature.com/articles/nature14664)
 
--The SCLC subtype classification workflow used in this project is adapted from:
+- The SCLC subtype classification workflow used in this project is adapted from:
 
 > Chan, J.M., Quintanal-Villalonga, Á., Gao, V.R., Xie, Y., Allaj, V., Chaudhary, O., ... Rudin, C.M.  
 > *Signatures of plasticity, metastasis, and immunosuppression in an atlas of human small cell lung cancer*.  
