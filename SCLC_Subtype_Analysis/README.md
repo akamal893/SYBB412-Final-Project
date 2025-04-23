@@ -4,8 +4,7 @@ This repository provides a reproducible pipeline for performing differential exp
 
 ## Files
 
-- `mast_analysis.Rmd`: Main R Markdown analysis script.
-- `data/`: Folder for input data (not uploaded to GitHub if large).
+- `SCLC Subtype Differential Expression Analysis using MAST.Rmd`: Main R Markdown analysis script.
 - `results/`: Output of DEGs, plots, and enrichment analyses.
 
 ## Requirements
