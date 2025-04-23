@@ -1,5 +1,5 @@
 ---
-title: "sclc_subtype_labeling_from_bulk_degs.py"
+title: "sclc_subtype_labeling_from_bulk_degs"
 output: html_document
 date: "2025-04-23"
 ---
@@ -60,7 +60,7 @@ adata[["diffmap"]] <- CreateDimReducObject(embeddings = diffmap, key = "DC_")
 
 # Subtype Gene Scoring
 ```{r subtype-scoring, include=TRUE}
-SCLC_subtype_dir <- file.path(out_dir, "out.publication.010920/bulk_ref")
+SCLC_subtype_dir <- file.path(out_dir, "subtype_classification/bulk_reference")
 ct_dict <- list()
 for (i in c('SCLC-A', 'SCLC-N', 'SCLC-P', 'SCLC-Y')) {
   deg_file <- file.path(SCLC_subtype_dir, paste0("George_etal.limma.DEG.", i, ".090219.csv"))
