@@ -1,7 +1,7 @@
 ---
 title: "sclc_subtype_labeling_from_bulk_degs"
 output: html_document
-date: "2025-04-23"
+date: "`r Sys.Date()`"
 ---
 
 ```{r setup, include=FALSE}
