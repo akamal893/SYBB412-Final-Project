@@ -25,8 +25,8 @@ This classification method is **adapted from published work** and only used for 
 
 - The SCLC subtype classification workflow used in this project is adapted from:
 
-> Chan, J.M., Quintanal-Villalonga, Á., Gao, V.R., Xie, Y., Allaj, V., Chaudhary, O., ... Rudin, C.M.  
-> *Signatures of plasticity, metastasis, and immunosuppression in an atlas of human small cell lung cancer*.  
-> Cancer Cell, 2021. [https://doi.org/10.1016/j.ccell.2021.04.005](https://www.sciencedirect.com/science/article/pii/S1535610821004979?via%3Dihub#app2)
+  > Chan, J.M., Quintanal-Villalonga, Á., Gao, V.R., Xie, Y., Allaj, V., Chaudhary, O., ... Rudin, C.M.  
+  > *Signatures of plasticity, metastasis, and immunosuppression in an atlas of human small cell lung cancer*.  
+  > Cancer Cell, 2021. [https://doi.org/10.1016/j.ccell.2021.04.005](https://www.sciencedirect.com/science/article/pii/S1535610821004979?via%3Dihub#app2)
 
 The authors provided a Python-based classification pipeline (`Classify_SCLC_subtype.py`), which was reimplemented here using R and integrated into a Seurat-based analysis workflow.
