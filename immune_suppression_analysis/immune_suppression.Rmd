@@ -1,0 +1,376 @@
+---
+title: "immune suppression"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(pheatmap)
+library(ggrepel)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(circlize)
+library(data.table)
+
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Filter immune supression degs
+
+```{r}
+
+
+# Function to filter DEGs related to immune suppression
+filter_immune_suppression_degs <- function(deg_file_path, output_file_path = NULL) {
+  # Load DEG data
+  deg_data <- readRDS(deg_file_path)
+  
+  # Check if the data is in the expected format (SCLC-A_vs_SCLC-N)
+  if ("SCLC-A_vs_SCLC-N" %in% names(deg_data)) {
+    # Extract the actual DEG data frame
+    deg_df <- deg_data[["SCLC-A_vs_SCLC-N"]]
+    cat("Successfully extracted DEG data from SCLC-A_vs_SCLC-N\n")
+  } else {
+    # If not in the expected format, assume it's already a data frame
+    deg_df <- deg_data
+    cat("Using the provided DEG data directly\n")
+  }
+  
+  # Print summary of DEG data
+  cat("DEG data summary:\n")
+  print(head(deg_df))
+  cat("DEG data dimensions:", dim(deg_df), "\n")
+  
+  # Download MSigDB C7 gene sets (Immunologic Signatures)
+  # Using 'collection' instead of deprecated 'category'
+  c7_gene_sets <- msigdbr(species = "Homo sapiens", collection = "C7") %>%
+    dplyr::select(gs_name, gene_symbol) %>%
+    split(x = .$gene_symbol, f = .$gs_name)
+  
+  cat("Downloaded", length(c7_gene_sets), "immunologic signature gene sets\n")
+  
+  # Filter for immune suppression related gene sets (keywords in gene set names)
+  immune_suppression_keywords <- c(
+    "SUPPRESSOR", "SUPPRESS", "INHIBIT", "EXHAUST", 
+    "REGULAT", "CHECKPOINT", "TOLERANCE", "ANERG",
+    "TREG", "PD1", "CTLA4", "LAG3", "TIM3", "MDSC"
+  )
+  
+  # Create regex pattern for matching
+  pattern <- paste0(immune_suppression_keywords, collapse = "|")
+  
+  # Filter gene sets related to immune suppression
+  immune_suppression_gene_sets <- c7_gene_sets[grep(pattern, names(c7_gene_sets), ignore.case = TRUE)]
+  cat("Filtered", length(immune_suppression_gene_sets), "immune suppression related gene sets\n")
+  
+  # Extract all unique genes from immune suppression gene sets
+  immune_suppression_genes <- unique(unlist(immune_suppression_gene_sets))
+  cat("Total unique immune suppression genes:", length(immune_suppression_genes), "\n")
+  
+  # Determine the gene symbol column name in the DEG data
+  # First check for common gene symbol column names
+  
+  gene_col <- "gene"
+  
+  # Filter DEGs related to immune suppression
+  filtered_degs <- deg_df %>%
+    filter(!!sym(gene_col) %in% immune_suppression_genes)
+  
+  cat("Filtered DEGs related to immune suppression:", nrow(filtered_degs), "\n")
+  
+  # Optionally save the filtered DEGs
+  if (!is.null(output_file_path)) {
+    saveRDS(filtered_degs, output_file_path)
+    cat("Filtered DEGs saved to:", output_file_path, "\n")
+  }
+  
+  # Return the filtered DEGs
+  return(filtered_degs)
+}
+
+
+```
+
+# Enrichment pathway analysis
+
+```{r pressure, echo=FALSE}
+
+
+# Load immune suppression-related DEGs
+immune_suppression_degs <- readRDS("immune_suppression_degs.rds")
+
+# Extract gene symbols from the data
+gene_symbols <- immune_suppression_degs$gene
+
+
+# Convert gene symbols to Entrez and Ensembl IDs
+gene_ids <- bitr(gene_symbols, 
+                fromType = "SYMBOL", 
+                toType = c("ENTREZID", "ENSEMBL"), 
+                OrgDb = org.Hs.eg.db)
+
+# Create a ranked gene list by logFC
+gene_list <- immune_suppression_degs[[logFC_col]]
+names(gene_list) <- immune_suppression_degs$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Identify upregulated and downregulated genes
+up_genes <- names(gene_list)[gene_list > 0]
+down_genes <- names(gene_list)[gene_list < 0]
+
+
+# GO enrichment analysis
+go_bp <- enrichGO(gene = gene_symbols,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+
+go_mf <- enrichGO(gene = gene_symbols,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "MF",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+
+go_cc <- enrichGO(gene = gene_symbols,
+                 OrgDb = org.Hs.eg.db,
+                 keyType = "SYMBOL",
+                 ont = "CC",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05)
+
+saveRDS(go_bp, "immune_suppression_go_bp.rds")
+saveRDS(go_mf, "immune_suppression_go_mf.rds")
+saveRDS(go_cc, "immune_suppression_go_cc.rds")
+
+# Visualize GO enrichment results
+bp_plot <- barplot(go_bp, showCategory = 20, title = "GO Biological Process")
+ggsave("immune_suppression_GO_BP.png", bp_plot, width = 12, height = 10)
+
+mf_plot <- barplot(go_mf, showCategory = 20, title = "GO Molecular Function")
+ggsave("immune_suppression_GO_MF.png", mf_plot, width = 12, height = 10)
+
+cc_plot <- barplot(go_cc, showCategory = 20, title = "GO Cellular Component")
+ggsave("immune_suppression_GO_CC.png", cc_plot, width = 12, height = 10)
+
+# Generate GO enrichment network plot
+if(nrow(go_bp) > 0) {
+  bp_network <- pairwise_termsim(go_bp)
+  emapplot_bp <- emapplot(bp_network, showCategory = 30)
+  ggsave("immune_suppression_GO_BP_network.png", emapplot_bp, width = 14, height = 12)
+}
+
+# KEGG pathway enrichment
+kegg_enrichment <- enrichKEGG(
+  gene = gene_ids$ENTREZID,
+  organism = "hsa",
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH"
+)
+
+saveRDS(kegg_enrichment, "immune_suppression_kegg.rds")
+
+# Visualize KEGG results
+if(nrow(kegg_enrichment) > 0) {
+  kegg_plot <- barplot(kegg_enrichment, showCategory = 20, title = "KEGG Pathway")
+  ggsave("immune_suppression_KEGG.png", kegg_plot, width = 12, height = 10)
+  
+  # KEGG enrichment network
+  kegg_network <- pairwise_termsim(kegg_enrichment)
+  emapplot_kegg <- emapplot(kegg_network, showCategory = 30)
+  ggsave("immune_suppression_KEGG_network.png", emapplot_kegg, width = 14, height = 12)
+}
+
+# Reactome pathway enrichment
+reactome_enrichment <- enrichPathway(
+  gene = gene_ids$ENTREZID,
+  organism = "human",
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH"
+)
+
+saveRDS(reactome_enrichment, "immune_suppression_reactome.rds")
+
+# Visualize Reactome results
+if(nrow(reactome_enrichment) > 0) {
+  reactome_plot <- barplot(reactome_enrichment, showCategory = 20, title = "Reactome Pathway")
+  ggsave("immune_suppression_Reactome.png", reactome_plot, width = 12, height = 10)
+}
+
+
+# GSEA analysis using ranked gene list
+gsea_result <- gseGO(geneList = gene_list,
+                    OrgDb = org.Hs.eg.db,
+                    keyType = "SYMBOL",
+                    ont = "BP",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    pvalueCutoff = 0.05,
+                    verbose = FALSE)
+
+saveRDS(gsea_result, "immune_suppression_gsea_go.rds")
+
+# Visualize GSEA results
+if(nrow(gsea_result) > 0) {
+  gsea_plot <- gseaplot2(gsea_result, geneSetID = 1:3, title = "GSEA of GO terms")
+  ggsave("immune_suppression_GSEA_GO.png", gsea_plot, width = 12, height = 8)
+  ridgeplot(gsea_result, showCategory = 20)
+  ggsave("immune_suppression_GSEA_ridge.png", width = 12, height = 10)
+}
+
+
+```
+
+# Visualization of DEGs
+```{r pressure, echo=FALSE}
+
+# Load immune suppression-related DEG data
+
+immune_suppression_degs <- readRDS("immune_suppression_degs.rds")
+
+
+# Add significance classification
+immune_suppression_degs$significance <- ifelse(
+  immune_suppression_degs[[fdr_col]] < 0.05,
+  ifelse(immune_suppression_degs[[logFC_col]] > 0, "Up-regulated", "Down-regulated"),
+  "Not significant"
+)
+
+
+# 1. Volcano Plot
+volcano_plot <- ggplot(immune_suppression_degs, 
+                       aes(x = !!sym(logFC_col), 
+                           y = -log10(!!sym(pval_col)), 
+                           color = significance)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  scale_color_manual(values = c("Up-regulated" = "red", 
+                               "Down-regulated" = "blue", 
+                               "Not significant" = "grey")) +
+  theme_bw() +
+  labs(x = "Log2 Fold Change", 
+       y = "-log10(p-value)", 
+       title = "Volcano Plot of Immune Suppression DEGs") +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10)) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed")
+
+# Label top 20 most significant genes
+top_genes <- immune_suppression_degs %>%
+  filter(significance != "Not significant") %>%
+  arrange(!!sym(pval_col)) %>%
+  head(20)
+
+volcano_plot_labeled <- volcano_plot +
+  geom_text_repel(data = top_genes,
+                 aes(x = !!sym(logFC_col), 
+                     y = -log10(!!sym(pval_col)), 
+                     label = gene),
+                 box.padding = 0.5,
+                 max.overlaps = 20,
+                 size = 3)
+
+ggsave("immune_suppression_volcano.png", volcano_plot_labeled, width = 10, height = 8)
+
+# 2. Barplot of Top 50 DEGs
+top50_degs <- immune_suppression_degs %>%
+  filter(significance != "Not significant") %>%
+  arrange(!!sym(pval_col)) %>%
+  head(50)
+
+barplot_top50 <- ggplot(top50_degs, 
+                        aes(x = reorder(gene, !!sym(logFC_col)), 
+                            y = !!sym(logFC_col), 
+                            fill = significance)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Up-regulated" = "red", 
+                              "Down-regulated" = "blue")) +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "Gene", 
+       y = "Log2 Fold Change", 
+       title = "Top 50 Significant Immune Suppression DEGs") +
+  theme(axis.text.y = element_text(size = 8))
+
+ggsave("immune_suppression_top50_barplot.png", barplot_top50, width = 12, height = 10)
+
+# 3. Density Distribution Plot
+dist_plot <- ggplot(immune_suppression_degs, aes(x = !!sym(logFC_col), fill = significance)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("Up-regulated" = "red", 
+                              "Down-regulated" = "blue", 
+                              "Not significant" = "grey")) +
+  theme_bw() +
+  labs(x = "Log2 Fold Change", 
+       y = "Density", 
+       title = "Distribution of Immune Suppression Gene Expression Changes") +
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+ggsave("immune_suppression_expression_distribution.png", dist_plot, width = 10, height = 6)
+
+# 5. MA Plot
+if("pct.1" %in% colnames(immune_suppression_degs) && "pct.2" %in% colnames(immune_suppression_degs)) {
+  ma_plot <- ggplot(immune_suppression_degs, 
+         aes(x = (pct.1 + pct.2)/2, 
+             y = !!sym(logFC_col), 
+             color = significance)) +
+    geom_point(alpha = 0.7) +
+    scale_color_manual(values = c("Up-regulated" = "red", 
+                                 "Down-regulated" = "blue", 
+                                 "Not significant" = "grey")) +
+    labs(x = "Mean of Normalized Counts", 
+         y = "Log2 Fold Change", 
+         title = "MA Plot of Immune Suppression DEGs") +
+    theme_bw() +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_hline(yintercept = c(-1, 1), linetype = "dotted")
+
+  ggsave("immune_suppression_MA_plot.png", ma_plot, width = 10, height = 8)
+}
+
+# 6. Baxplot of Top 10 DEGs
+if(nrow(top50_degs) > 0) {
+  top10_degs <- top50_degs %>% head(10)
+  boxplot_data <- data.frame(
+    gene = rep(top10_degs$gene, each = 1),
+    logFC = top10_degs[[logFC_col]],
+    significance = top10_degs$significance
+  )
+  
+  top10_boxplot <- ggplot(boxplot_data, 
+                          aes(x = reorder(gene, logFC), 
+                              y = logFC, 
+                              fill = significance)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("Up-regulated" = "red", 
+                                "Down-regulated" = "blue")) +
+    coord_flip() +
+    theme_bw() +
+    labs(x = "Gene", 
+         y = "Log2 Fold Change", 
+         title = "Top 10 Immune Suppression Genes") +
+    theme(axis.text.y = element_text(size = 12, face = "bold"))
+  
+  ggsave("immune_suppression_top10_boxplot.png", top10_boxplot, width = 10, height = 8)
+}
+```
