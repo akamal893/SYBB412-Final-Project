@@ -17,3 +17,16 @@ Steps include:
 ## Note
 
 This classification method is **adapted from published work** and only used for subtype labeling prior to independent downstream analysis. All subsequent analyses (e.g., clustering, DEGs, GSEA) are performed independently.
+
+## Data and Method Citation
+
+- The subtype-specific gene signatures (SCLC-A, N, P) used in this project are based on the study by George et al., 2015:
+  > George, J., et al. *Comprehensive genomic profiles of small cell lung cancer*. Nature 524, 47–53 (2015). [https://doi.org/10.1038/nature14664](https://www.nature.com/articles/nature14664)
+
+-The SCLC subtype classification workflow used in this project is adapted from:
+
+> Chan, J.M., Quintanal-Villalonga, Á., Gao, V.R., Xie, Y., Allaj, V., Chaudhary, O., ... Rudin, C.M.  
+> *Signatures of plasticity, metastasis, and immunosuppression in an atlas of human small cell lung cancer*.  
+> Cancer Cell, 2021. [https://doi.org/10.1016/j.ccell.2021.04.005](https://www.sciencedirect.com/science/article/pii/S1535610821004979?via%3Dihub#app2)
+
+The authors provided a Python-based classification pipeline (`Classify_SCLC_subtype.py`), which was reimplemented here using R and integrated into a Seurat-based analysis workflow.
