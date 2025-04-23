@@ -1,0 +1,123 @@
+---
+title: "sclc_subtype_labeling_from_bulk_degs.py"
+output: html_document
+date: "2025-04-23"
+---
+
+```{r setup, include=FALSE}
+# Load required libraries
+library(Seurat)
+library(dplyr)
+library(reticulate)
+library(tibble)
+library(Matrix)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+# Set knitr chunk options
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+This document outlines the data processing pipeline used to analyze single-cell RNA-seq data from a small cell lung cancer (SCLC) cohort. It includes steps for reading `.h5ad` data, converting to Seurat object.
+
+# Environment Setup
+```{r setup-python, include=FALSE}
+# Create output directory
+out_dir <- 'SYBB412_Project'
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Set up Python environment
+reticulate::use_miniconda("r-reticulate", required = TRUE)
+py_install(c("scanpy", "numpy", "pandas"))
+use_python(Sys.which("python3"))
+
+# Import scanpy
+sc <- import("scanpy")
+```
+
+# Load and Convert AnnData
+```{r read-file, include=TRUE}
+### Can be downloaded at https://data.humantumoratlas.org/
+h5ad_file <- file.path(out_dir, "adata.SCLC.010920.h5ad")
+adata_py <- sc$read_h5ad(h5ad_file)
+
+# Convert to Seurat
+counts <- t(py_to_r(adata_py$X))
+rownames(counts) <- py_to_r(adata_py$var_names$to_list())
+colnames(counts) <- py_to_r(adata_py$obs_names$to_list())
+adata <- CreateSeuratObject(counts = counts)
+adata@meta.data <- cbind(adata@meta.data, py_to_r(adata_py$obs))
+```
+
+# Add Dimensionality Reductions
+```{r add-diffmap, include=TRUE}
+diffmap <- py_to_r(adata_py$obsm["X_diffmap"])
+rownames(diffmap) <- colnames(counts)
+adata[["diffmap"]] <- CreateDimReducObject(embeddings = diffmap, key = "DC_")
+```
+
+# Subtype Gene Scoring
+```{r subtype-scoring, include=TRUE}
+SCLC_subtype_dir <- file.path(out_dir, "out.publication.010920/bulk_ref")
+ct_dict <- list()
+for (i in c('SCLC-A', 'SCLC-N', 'SCLC-P', 'SCLC-Y')) {
+  deg_file <- file.path(SCLC_subtype_dir, paste0("George_etal.limma.DEG.", i, ".090219.csv"))
+  deg_rest <- read.table(deg_file, sep = '\t', header = TRUE)
+  up_genes <- rownames(deg_rest[deg_rest$logFC > 0, ])[order(deg_rest$adj.P.Val[deg_rest$logFC > 0])[1:100]]
+  ct_dict[[i]] <- up_genes
+}
+
+adata_tmp <- NormalizeData(adata)
+adata_tmp <- ScaleData(adata_tmp)
+
+for (i in names(ct_dict)) {
+  adata_tmp <- AddModuleScore(adata_tmp, features = list(unique(ct_dict[[i]])), name = paste0("limma_", i))
+  colnames(adata_tmp@meta.data)[grep(paste0("limma_", i, "1"), colnames(adata_tmp@meta.data))] <- paste0("limma_", i)
+}
+
+write.csv(adata_tmp@meta.data, file = "SCLC_subtype_scores.csv")
+```
+
+# Subtype Classification
+```{r classify-cells, include=TRUE}
+SCLCtype_score <- adata_tmp@meta.data[, c('limma_SCLC-A', 'limma_SCLC-N', 'limma_SCLC-P')]
+extrema <- data.frame(
+  'limma_SCLC-A' = c(10, 0, 0),
+  'limma_SCLC-N' = c(0, 10, 0),
+  'limma_SCLC-P' = c(0, 0, 10),
+  row.names = c('SCLC-A', 'SCLC-N', 'SCLC-P')
+)
+
+calculate_distances <- function(extrema, scores) {
+  result <- matrix(0, nrow = nrow(extrema), ncol = nrow(scores))
+  rownames(result) <- rownames(extrema)
+  colnames(result) <- rownames(scores)
+  for (i in 1:nrow(extrema)) {
+    for (j in 1:nrow(scores)) {
+      result[i, j] <- sqrt(sum((extrema[i, ] - scores[j, ])^2))
+    }
+  }
+  return(as.data.frame(result))
+}
+
+dists <- calculate_distances(extrema, SCLCtype_score)
+train_labels <- list()
+for (cell_type in rownames(extrema)) {
+  sorted <- order(as.numeric(dists[cell_type, ]), decreasing = TRUE)[1:100]
+  train_labels[[cell_type]] <- colnames(dists)[sorted]
+}
+
+classification_results <- data.frame(cell_id = colnames(adata), stringsAsFactors = FALSE)
+classification_results$training_label <- NA
+for (cell_type in names(train_labels)) {
+  classification_results$training_label[classification_results$cell_id %in% train_labels[[cell_type]]] <- cell_type
+}
+
+write.csv(classification_results, "SCLC_classification_training_labels.csv", row.names = FALSE)
+write.csv(dists, file = "SCLC_subtype_distances.csv")
+saveRDS(adata, file = "SCLC_analysis_seurat_object.rds")
+```
+
+
