@@ -56,7 +56,7 @@ prepare_data <- function(seurat_obj, subtype_col = "SCLC_subtype") {
 setup_parallel <- function() {
   plan(multicore, workers = parallel::detectCores() - 1)
   plan(multicore, workers = 14)
-  options(future.globals.maxSize = 60 * 1024^3)  # 50GB max memory
+  options(future.globals.maxSize = 50 * 1024^3)  # 50GB max memory
 }
 
 # 3. create gene chunks
