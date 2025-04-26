@@ -1,0 +1,179 @@
+---
+title: "modulescore"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+
+# This script constructs an immune suppression module score using hub genes,
+# compares scores between subtypes/clusters, and analyzes survival prediction
+
+# Module Scoring and Functional Phenotype Validation for Immune Suppression
+```{r setup, include=FALSE}
+# Load required packages
+library(Seurat)       
+library(dplyr)        
+library(ggplot2)      
+library(survival)     
+library(pheatmap)     
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+seurat_obj <- readRDS("/home/zxz1583/SYBB412_Project/SYBB412Project/seurat_normalize.rds")
+
+# Step 2: Define your hub genes for immune suppression module
+# Correctly reading the Excel file with hub genes
+immune_suppression_genes_df <- read_xlsx("/home/zxz1583/SYBB412_Project/SYBB412Project/hub/hub_2.xlsx")
+```
+
+
+
+```{r}
+# Extract the genes from the dataframe - assuming they're in the first column
+immune_suppression_genes <- as.character(immune_suppression_genes_df[[1]])
+
+# Verify all genes are in your dataset
+missing_genes <- immune_suppression_genes[!immune_suppression_genes %in% rownames(seurat_obj)]
+if(length(missing_genes) > 0) {
+  cat("Warning: The following genes are not in your dataset:", missing_genes, "\n")
+  immune_suppression_genes <- immune_suppression_genes[immune_suppression_genes %in% rownames(seurat_obj)]
+}
+
+# Step 3: Calculate the immune suppression module score
+seurat_obj <- AddModuleScore(
+  object = seurat_obj,
+  features = list(ImmuneSuppressionSignature = immune_suppression_genes),
+  name = "immuneSuppression_score"
+)
+
+# The score will be stored in metadata as "immuneSuppression_score1"
+# Extract scores and add to metadata for easier access
+seurat_obj$immune_suppression_score <- seurat_obj$immuneSuppression_score1
+
+# Step 4: Compare module scores between different subtypes/clusters
+# Using SCLC_subtype instead of subtype
+p1 <- ggplot(seurat_obj@meta.data, aes(x = SCLC_subtype, y = immune_suppression_score, fill = SCLC_subtype)) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(title = "Immune Suppression Score by SCLC Subtype",
+       x = "SCLC Subtype", 
+       y = "Immune Suppression Score") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Save the plot instead of displaying it
+ggsave("immune_suppression_score_by_subtype.pdf", p1, width = 12, height = 8)
+
+# Statistical test to compare differences between subtypes
+sink("statistical_test_results.txt")
+subtype_comparison <- kruskal.test(immune_suppression_score ~ SCLC_subtype, data = seurat_obj@meta.data)
+print(subtype_comparison)
+
+# Pairwise comparisons if you have more than two subtypes
+if(length(unique(seurat_obj@meta.data$SCLC_subtype)) > 2) {
+  pairwise_tests <- pairwise.wilcox.test(
+    seurat_obj@meta.data$immune_suppression_score, 
+    seurat_obj@meta.data$SCLC_subtype,
+    p.adjust.method = "bonferroni"
+  )
+  print(pairwise_tests)
+}
+sink()
+
+# Step 6: Analyze correlation with SCLC-N subtype
+# Check if you have SCLC subtype information using the correct column name
+if("SCLC_subtype" %in% colnames(seurat_obj@meta.data)) {
+  # Visualize score distribution between SCLC-N and other subtypes
+  p3 <- ggplot(seurat_obj@meta.data, aes(x = SCLC_subtype, y = immune_suppression_score, fill = SCLC_subtype)) +
+    geom_boxplot() +
+    theme_classic() +
+    labs(title = "Immune Suppression Score by SCLC Subtype",
+         x = "SCLC Subtype", 
+         y = "Immune Suppression Score")
+  ggsave("immune_suppression_score_by_sclc_subtype.pdf", p3, width = 8, height = 6)
+  
+  # Statistical test for SCLC-N vs others
+  is_sclc_n <- seurat_obj@meta.data$SCLC_subtype == "SCLC-N"
+  sclc_n_test <- wilcox.test(
+    seurat_obj@meta.data$immune_suppression_score[is_sclc_n],
+    seurat_obj@meta.data$immune_suppression_score[!is_sclc_n]
+  )
+  
+  # Save the test results
+  sink("sclc_n_test_results.txt")
+  print(sclc_n_test)
+  
+  # Calculate correlation coefficient (point-biserial for binary variable)
+  seurat_obj@meta.data$is_sclc_n_numeric <- as.numeric(is_sclc_n)
+  correlation <- cor.test(
+    seurat_obj@meta.data$immune_suppression_score,
+    seurat_obj@meta.data$is_sclc_n_numeric,
+    method = "pearson"
+  )
+  print(correlation)
+  sink()
+} else {
+  cat("SCLC subtype information not found in metadata. Skipping SCLC-N correlation analysis.\n")
+}
+
+# Step 7: Visualize gene expression across subtypes with heatmap
+# Extract expression for immune suppression genes
+gene_expr <- GetAssayData(seurat_obj, slot = "data")[immune_suppression_genes, ]
+
+# Prepare annotation data for heatmap
+annotation_col <- data.frame(
+  Subtype = seurat_obj@meta.data$SCLC_subtype,
+  Module_Score = seurat_obj@meta.data$immune_suppression_score,
+  row.names = colnames(gene_expr)
+)
+
+# Create color schemes
+ann_colors <- list(
+  Subtype = setNames(colorRampPalette(c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"))(
+    length(unique(annotation_col$Subtype))), 
+    unique(annotation_col$Subtype)),
+  Module_Score = colorRampPalette(c("blue", "white", "red"))(100)
+)
+
+# Generate heatmap
+pdf("immune_suppression_genes_heatmap.pdf", width = 10, height = 12)
+pheatmap(
+  gene_expr,
+  annotation_col = annotation_col,
+  annotation_colors = ann_colors,
+  show_colnames = FALSE,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  main = "Expression of Immune Suppression Hub Genes",
+  fontsize_row = 8,
+  scale = "row"
+)
+dev.off()
+
+# Save UMAP visualization with immune suppression score overlay
+pdf("immune_suppression_umap.pdf", width = 10, height = 8)
+FeaturePlot(seurat_obj, 
+            features = "immune_suppression_score", 
+            reduction = "diffmap",
+            label = TRUE,
+            label.size = 3,
+            pt.size = 0.5) +
+  scale_color_gradientn(colors = c("blue", "white", "red")) +
+  labs(title = "Immune Suppression Score diffmap")
+dev.off()
+
+# Generate violin plot for immune suppression score by SCLC subtype
+pdf("immune_suppression_violin.pdf", width = 10, height = 6)
+VlnPlot(seurat_obj, 
+        features = "immune_suppression_score", 
+        group.by = "SCLC_subtype", 
+        pt.size = 0) +
+  labs(title = "Immune Suppression Score Distribution by SCLC Subtype")
+dev.off()
+
+# Step 8: Save results
+write.csv(seurat_obj@meta.data, "immune_suppression_module_results.csv")
+```
+
+
